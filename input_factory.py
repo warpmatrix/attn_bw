@@ -1,8 +1,7 @@
 import random
 
 from typing import Optional
-
-from vllm.config import VllmConfig
+from utils import ModelConfig
 
 
 def _adjust_random_nums_by_max(nums: list[int], max_num: int):
@@ -56,10 +55,10 @@ def create_seq_lens(
     batch: int,
     avg_seq_len: Optional[int] = None,
     max_seq_len: Optional[int] = None,
-    config: Optional[VllmConfig] = None,
+    model_config: Optional[ModelConfig] = None,
 ) -> list[int]:
     if max_seq_len is None:
-        assert config is not None
-        max_seq_len = config.model_config.max_model_len
+        assert model_config is not None
+        max_seq_len = model_config.max_model_len
     seq_lens = _create_random_integers_by_avg(avg_seq_len, batch, max_seq_len)
     return seq_lens

@@ -5,34 +5,30 @@ import os
 
 from torch import multiprocessing
 from multiprocessing.managers import DictProxy
-from vllm.config import LoadFormat, ModelConfig, ParallelConfig
-from vllm.engine.arg_utils import EngineArgs
-from vllm.utils import cdiv
-from vllm.utils import update_environment_variables
+from utils import cdiv, ModelConfig, models
 
 import input_factory, csv_utils
 
 
-def get_token_size(model_config: ModelConfig, parallel_config: ParallelConfig, kv_dtype: torch.dtype):
-    num_layers = model_config.get_num_layers(parallel_config)
-    num_kv_heads = model_config.get_num_kv_heads(parallel_config)
-    head_dim = model_config.get_head_size()
+def get_token_size(model_config: ModelConfig, kv_dtype: torch.dtype):
+    num_layers = model_config.num_layers
+    num_kv_heads = model_config.num_kv_heads
+    head_dim = model_config.head_dim
     token_size = num_layers * 2 * num_kv_heads * head_dim * kv_dtype.itemsize  # bytes
     token_size /= 1024 * 1024  # convert to MB
     return token_size
 
 
-def profile_bandwidth(model: str, batch_size: int, avg_seq_len: int):
-    engine_args = EngineArgs(model, load_format=LoadFormat.DUMMY)
-    config = engine_args.create_engine_config()
+def profile_bandwidth(model_name: str, batch_size: int, avg_seq_len: int):
+    model_config = models[model_name]
 
-    num_layers = config.model_config.get_num_layers(config.parallel_config)
-    num_qo_heads = config.model_config.get_num_attention_heads(config.parallel_config)
-    num_kv_heads = config.model_config.get_num_kv_heads(config.parallel_config)
-    head_dim = config.model_config.get_head_size()
-    block_size = config.cache_config.block_size
+    num_layers = model_config.num_layers
+    num_qo_heads = model_config.num_qo_heads
+    num_kv_heads = model_config.num_kv_heads
+    head_dim = model_config.head_dim
+    block_size = 16
 
-    seq_lens = input_factory.create_seq_lens(batch_size, avg_seq_len, config=config)
+    seq_lens = input_factory.create_seq_lens(batch_size, avg_seq_len, model_config=model_config)
     block_lens = [cdiv(seq_len, block_size) for seq_len in seq_lens]
 
     max_num_pages = sum(block_lens)
@@ -89,7 +85,7 @@ def profile_bandwidth(model: str, batch_size: int, avg_seq_len: int):
     end.record()
     torch.cuda.synchronize()
     attn_time = start.elapsed_time(end)  # ms
-    token_size = get_token_size(config.model_config, config.parallel_config, torch.float16)
+    token_size = get_token_size(model_config, torch.float16)
     size = avg_seq_len * batch_size * token_size  # MB
     bandwidth = size / attn_time  # GB/s
     return bandwidth
@@ -104,8 +100,8 @@ def worker(model: str, batch_size: int, avg_seq_len: int, sm_pct: int, bandwidth
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, default="meta-llama/Llama-2-7b-hf")
-    parser.add_argument("--avg-seq-len", type=int)
-    parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--avg-seq-len", type=int, default=4096)
+    parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--output-file", type=str)
     parser.add_argument("--sm-pcts", type=int, nargs="+", default=[100])
     args = parser.parse_args()
@@ -129,8 +125,7 @@ if __name__ == "__main__":
     for sm_pct in sm_pcts:
         process_args = (model, batch_size, avg_seq_len, sm_pct, bandwidths)
         p = ctx.Process(target=worker, args=process_args)
-        env_dicts = {"CUDA_MPS_ACTIVE_THREAD_PERCENTAGE": str(sm_pct)}
-        update_environment_variables(env_dicts)
+        os.environ["CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"] = str(sm_pct)
         p.start()
         p.join()
 
